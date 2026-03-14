@@ -1,0 +1,93 @@
+{
+  "Comment": "Self-Healing Data Pipeline Orchestrator",
+  "StartAt": "RunGlueETLJob",
+  "States": {
+    "RunGlueETLJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "orders-etl-with-quality",
+        "Arguments": {
+          "--S3_INPUT_PATH.$": "$.inputPath",
+          "--S3_OUTPUT_PATH.$": "$.outputPath"
+        }
+      },
+      "Next": "GetQualityResults",
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "HandleJobFailure" }]
+    },
+    "GetQualityResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": { "FunctionName": "get-quality-results", "Payload.$": "$" },
+      "ResultPath": "$.qualityResults",
+      "Next": "EvaluateQuality"
+    },
+    "EvaluateQuality": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.qualityResults.anomalies_detected", "NumericGreaterThan": 0, "Next": "DiagnoseWithBedrock" },
+        { "Variable": "$.qualityResults.failed_rules", "NumericGreaterThan": 0, "Next": "DiagnoseWithBedrock" }
+      ],
+      "Default": "PipelineSuccess"
+    },
+    "DiagnoseWithBedrock": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::bedrock:invokeModel",
+      "Parameters": {
+        "ModelId": "anthropic.claude-3-sonnet-20240229-v1:0",
+        "ContentType": "application/json",
+        "Body": {
+          "anthropic_version": "bedrock-2023-05-31",
+          "max_tokens": 2048,
+          "messages": [{ "role": "user", "content.$": "States.Format('Analyze data quality issues: {}', States.JsonToString($.qualityResults))" }]
+        }
+      },
+      "ResultPath": "$.diagnosis",
+      "Next": "ParseDiagnosis"
+    },
+    "ParseDiagnosis": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": { "FunctionName": "parse-bedrock-diagnosis", "Payload.$": "$" },
+      "ResultPath": "$.parsedDiagnosis",
+      "Next": "DetermineAction"
+    },
+    "DetermineAction": {
+      "Type": "Choice",
+      "Choices": [
+        { "And": [
+          { "Variable": "$.parsedDiagnosis.recommended_action", "StringEquals": "AUTO_FIX" },
+          { "Variable": "$.parsedDiagnosis.confidence_score", "NumericGreaterThanEquals": 0.8 }
+        ], "Next": "ExecuteAutoFix" },
+        { "Variable": "$.parsedDiagnosis.recommended_action", "StringEquals": "QUARANTINE", "Next": "QuarantineData" }
+      ],
+      "Default": "AlertAndLog"
+    },
+    "ExecuteAutoFix": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": { "FunctionName": "execute-auto-remediation", "Payload.$": "$" },
+      "ResultPath": "$.remediationResult",
+      "Next": "RecordSuccess",
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "AlertAndLog" }]
+    },
+    "QuarantineData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": { "FunctionName": "quarantine-bad-data", "Payload.$": "$" },
+      "Next": "AlertAndLog"
+    },
+    "RecordSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "pipeline-incidents",
+        "Item": { "incident_id": { "S.$": "$.executionId" }, "outcome": { "S": "SUCCESS" } }
+      },
+      "Next": "PipelineSuccess"
+    },
+    "AlertAndLog": { "Type": "Pass", "End": true },
+    "HandleJobFailure": { "Type": "Pass", "Next": "AlertAndLog" },
+    "PipelineSuccess": { "Type": "Succeed" }
+  }
+}
