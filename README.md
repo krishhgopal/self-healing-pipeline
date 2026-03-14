@@ -2,6 +2,8 @@
 
 An intelligent data pipeline that detects anomalies, diagnoses root causes using generative AI, and automatically remediates issues.
 
+> **Disclaimer**: This is **reference architecture code** intended to accompany the [Dev.to article](https://dev.to/gmarimuthu/self-healing-data-pipeline). The code demonstrates architectural patterns and AWS service integration but is **not production-ready**. You will need to customize resource names, ARNs, IAM policies, and test thoroughly in your environment before any production use.
+
 ## Architecture
 
 ```
